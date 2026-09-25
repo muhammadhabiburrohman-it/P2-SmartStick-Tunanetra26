@@ -1,3 +1,31 @@
+# Tongkat Pintar — ESP32 Master & Slave
+
+Sistem dua ESP32 untuk tongkat pintar tunanetra: GPS + Firebase (Master) dan sensor ultrasonik + audio Bluetooth (Slave).
+
+## Setup sebelum upload
+
+**ESP32_1_Master** butuh kredensial WiFi & Firebase:
+
+1. Masuk ke folder `ESP32_1_Master/`
+2. Salin `secrets.example.h` menjadi `secrets.h`
+3. Isi `secrets.h` dengan SSID WiFi, password WiFi, Firebase Host, dan Firebase Auth/Database Secret milikmu sendiri
+4. `secrets.h` sudah masuk `.gitignore`, jadi tidak akan ter-commit
+
+**ESP32_2_Slave** tidak butuh kredensial apa pun — tinggal upload.
+
+## Struktur
+
+```
+ESP32_1_Master/
+  ESP32_1_Master.ino
+  secrets.example.h   <- template, aman di-commit
+  secrets.h            <- kredensial asli, JANGAN di-commit
+ESP32_2_Slave/
+  ESP32_2_Slave.ino
+.gitignore
+```
+
+
 # BiFi Smart Stick
 
 Tongkat pintar (smart cane) untuk membantu penyandang tunanetra mendeteksi halangan di sekitar, mengirimkan lokasi ke keluarga, serta memberikan peringatan darurat saat kontak dengan air — dilengkapi konektivitas internet mandiri melalui MiFi.
