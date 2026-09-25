@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BiFi Smart Stick</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getDatabase, ref, onValue, get, set, push, update, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAVj3LHNRit4F9Xw5ioiu9UdT6GMHvXOKg",
+            authDomain: "skripsiiot-8938d.firebaseapp.com",
+            databaseURL: "https://skripsiiot-8938d-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "skripsiiot-8938d",
+            storageBucket: "skripsiiot-8938d.firebasestorage.app",
+            messagingSenderId: "406152563731",
+            appId: "1:406152563731:web:e1306d8e554c9d203bc3e6"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // ── Konfigurasi pengirim notifikasi WhatsApp (Fonnte) ──
+        // Digabung langsung di sini dari sender.js — lihat catatan keamanan
+        // yang saya jelaskan di chat sebelum memakai ini di produksi.
+        const FONNTE_TOKEN = "TfpZkjnKnYxU2ehF9xeM";
+        const WEBSITE_URL = "https://bifismartstick.my.id/";
+        const DEFAULT_CONTACT = { nama: "Kontak Utama", nomor: "6285755133475" };
+
+        // ── GPS ──────────────────────────────────────────────
+        const gpsRef = ref(db, "/tongkat/gps/latest");
+        let __gpsQueue = null;
+        window.__updateGPS = d => { if (window.__gpsReady) window.__gpsHandler(d); else __gpsQueue = d; };
+
+        onValue(gpsRef, snap => {
+            const d = snap.val();
+            if (d) window.__updateGPS(d);
+        }, err => {
+            console.error("Firebase GPS Error:", err);
+            window.__setError ? window.__setError(err.message) : (window.__errQueue = err.message);
+        });
+
+        // ── Tombol Darurat ───────────────────────────────────
+        const buttonRefDb = ref(db, "/tongkat/button/status");
+        let __btnQueue = null;
+        window.__updateButton = v => { if (window.__btnReady) window.__btnHandler(v); else __btnQueue = v; };
+
+        onValue(buttonRefDb, snap => {
+            const aktif = snap.val() === true;
+            window.__updateButton(aktif);
+            if (aktif) kirimNotifikasiDarurat();
+        });
+
+        async function kirimNotifikasiDarurat() {
+            try {
+                const gpsSnap = await get(ref(db, "/tongkat/gps/latest"));
+                if (!gpsSnap.exists()) {
+                    console.warn("[WA] Data GPS belum tersedia, notifikasi dilewati.");
+                    return;
+                }
+                const kontakSnap = await get(kontakListRef);
+                const semuaKontak = kontakSnap.exists() ? Object.values(kontakSnap.val()) : [];
+                let tujuan = semuaKontak.filter(k => k && k.aktif && k.nomor);
+                if (tujuan.length === 0) tujuan = [DEFAULT_CONTACT];
+
+                const { latitude, longitude } = gpsSnap.val();
+                const mapsUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
+                const message = `*BiFi Smart Stick*\n\n` +
+                    `Pengguna menekan tombol bantuan!\n\n` +
+                    `*Lokasi (Google Maps):*\n${mapsUrl}\n\n` +
+                    `*Live Dashboard Website:*\n${WEBSITE_URL}\n\n` +
+                    `*Waktu:* ${new Date().toLocaleString('id-ID')}`;
+
+                const hasil = await Promise.allSettled(tujuan.map(k =>
+                    fetch("https://api.fonnte.com/send", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "Authorization": FONNTE_TOKEN },
+                        body: JSON.stringify({ target: k.nomor, message }),
+                    }).then(r => r.json())
+                ));
+
+                hasil.forEach((h, i) => {
+                    const label = tujuan[i].nama || tujuan[i].nomor;
+                    if (h.status === "fulfilled") {
+                        console.log(h.value?.status ? `[WA] Terkirim ke ${label}` : `[WA] Gagal ke ${label}: ${h.value?.reason}`);
+                    } else {
+                        console.error(`[WA] Error kirim ke ${label}:`, h.reason);
+                    }
+                });
+            } catch (err) {
+                console.error("[WA] Gagal mengirim notifikasi (cek koneksi/CORS):", err);
+            }
+        }
+
+        // ── Kontak Notifikasi Darurat — daftar bisa diubah & lebih dari 1 langsung dari website ──
+        const kontakListRef = ref(db, "/tongkat/settings/kontak_list");
+        let __sudahDiseed = false;
+
+        window.__tambahKontak = function (nama, nomor) {
+            const barisBaru = push(kontakListRef);
+            set(barisBaru, { nama, nomor, aktif: true }).catch(err => {
+                console.error("Gagal menambah kontak:", err);
+                alert("Gagal menyimpan ke Firebase: " + err.message + "\n(Pastikan Rules Database di Firebase Console sudah diatur .write: true)");
+            });
+        };
+
+        window.__editKontak = function (id, nama, nomor) {
+            update(ref(db, `/tongkat/settings/kontak_list/${id}`), { nama, nomor })
+                .catch(err => {
+                    console.error("Gagal mengubah kontak:", err);
+                    alert("Gagal mengubah kontak di Firebase: " + err.message);
+                });
+        };
+
+        window.__toggleKontak = function (id, aktifBaru) {
+            update(ref(db, `/tongkat/settings/kontak_list/${id}`), { aktif: aktifBaru })
+                .catch(err => {
+                    console.error("Gagal mengubah status kontak:", err);
+                    alert("Gagal mengubah status kontak: " + err.message);
+                });
+        };
+
+        window.__hapusKontak = function (id) {
+            remove(ref(db, `/tongkat/settings/kontak_list/${id}`))
+                .catch(err => {
+                    console.error("Gagal menghapus kontak:", err);
+                    alert("Gagal menghapus kontak: " + err.message);
+                });
+        };
+
+        onValue(kontakListRef, snap => {
+            const v = snap.val();
+
+            // Kalau daftar kontak masih kosong (pertama kali dipakai), isi dengan 3 contoh
+            // yang bisa langsung diedit/dihapus/diganti dari website.
+            if (!v && !__sudahDiseed) {
+                __sudahDiseed = true;
+                set(kontakListRef, {
+                    c1: { nama: "Keluarga 1", nomor: "6281234567890", aktif: true },
+                    c2: { nama: "Keluarga 2", nomor: "6281234567891", aktif: true },
+                    c3: { nama: "Keluarga 3", nomor: "6281234567892", aktif: true },
+                });
+                return; // onValue akan terpanggil lagi otomatis setelah data ini tersimpan
+            }
+
+            if (window.__kontakReady) window.__kontakHandler(v || {});
+            else window.__kontakQueue = v || {};
+        });
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet" />
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        display: ['Fraunces', 'serif'],
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        primary: '#D6534A',
+                        'primary-strong': '#B23D35',
+                        'primary-soft': '#FBE2DF',
+                        'primary-soft2': '#FEF0EE',
+                        ink: '#241715',
+                        'ink-muted': '#8A716E',
+                        line: '#F1DEDB',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: .15
+            }
+        }
+
+        @keyframes echoRing {
+            0% {
+                transform: scale(.4);
+                opacity: .55
+            }
+
+            75% {
+                opacity: 0
+            }
+
+            100% {
+                transform: scale(2.6);
+                opacity: 0
+            }
+        }
+
+        @keyframes fadeUp {
+            from {
+                opacity: 0;
+                transform: translateY(6px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0)
+            }
+        }
+
+        @keyframes alertPulseBg {
+
+            0%,
+            100% {
+                background-color: #B23D35
+            }
+
+            50% {
+                background-color: #D6534A
+            }
+        }
+
+        @keyframes alertRing {
+            0% {
+                transform: scale(1);
+                opacity: .6
+            }
+
+            100% {
+                transform: scale(1.9);
+                opacity: 0
+            }
+        }
+
+        .blink {
+            animation: blink 1.8s ease-in-out infinite;
+        }
+
+        .fade-up {
+            animation: fadeUp .3s ease forwards;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        .echo-ring {
+            position: absolute;
+            inset: 0;
+            border-radius: 9999px;
+            border: 2px solid #D6534A;
+            animation: echoRing 2.6s cubic-bezier(.2, .6, .35, 1) infinite;
+        }
+
+        .echo-ring.delay-1 {
+            animation-delay: .65s;
+        }
+
+        .echo-ring.delay-2 {
+            animation-delay: 1.3s;
+        }
+
+        .alert-ring {
+            position: absolute;
+            inset: 0;
+            border-radius: 9999px;
+            border: 2px solid #ffffff;
+            animation: alertRing 1.6s ease-out infinite;
+        }
+
+        .leaflet-popup-content-wrapper {
+            background: #fff !important;
+            border: 1px solid #F1DEDB !important;
+            border-radius: 14px !important;
+            box-shadow: 0 12px 32px rgba(178, 61, 53, .14) !important;
+            font-family: 'JetBrains Mono', monospace !important;
+            font-size: 11px !important;
+            color: #241715 !important;
+        }
+
+        .leaflet-popup-tip {
+            background: #fff !important;
+        }
+
+        .leaflet-popup-close-button {
+            color: #C9AFAC !important;
+        }
+
+        .leaflet-control-zoom a {
+            background: #fff !important;
+            color: #B23D35 !important;
+            border-color: #F1DEDB !important;
+            font-family: 'Inter', sans-serif !important;
+        }
+
+        .leaflet-control-zoom a:hover {
+            background: #FEF0EE !important;
+            color: #B23D35 !important;
+        }
+
+        ::-webkit-scrollbar {
+            width: 3px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #F1DEDB;
+            border-radius: 4px;
+        }
+
+        .trail-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+
+<body class="font-sans bg-white text-ink overflow-hidden h-screen">
+
+    <div class="flex flex-col lg:flex-row h-screen">
+
+        <!-- ══════════════════════ SIDEBAR ══════════════════════ -->
+        <aside
+            class="w-full lg:w-80 lg:min-w-80 bg-white border-b lg:border-b-0 lg:border-r border-line flex flex-col lg:h-screen lg:overflow-y-auto flex-shrink-0 max-h-[55vh] lg:max-h-none overflow-y-auto">
+
+            <div class="h-1 bg-primary flex-shrink-0"></div>
+
+            <!-- Brand -->
+            <div class="flex items-center justify-between px-5 py-4 border-b border-line">
+                <div class="flex items-center gap-3">
+                    <div
+                        class="relative w-10 h-10 rounded-2xl bg-primary flex items-center justify-center flex-shrink-0">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"
+                            stroke-linecap="round">
+                            <path d="M4 19c2-1 3-3 3-6 0-4-2-6-2-9" />
+                            <path d="M9 20c2.3-1.4 3.5-4 3.5-8 0-4.6-2.3-7-2.3-10.5" />
+                            <path d="M14.5 21c2.7-1.7 4-4.8 4-9.5C18.5 6 16 3 16 0" />
+                        </svg>
+                    </div>
+                    <div>
+                        <p class="font-display font-semibold text-[15px] text-ink tracking-tight leading-none">Tongkat
+                            Pintar</p>
+                        <p class="text-[10px] text-ink-muted mt-1 tracking-wide">Live Monitor &amp; Darurat</p>
+                    </div>
+                </div>
+
+                <div id="status-badge"
+                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border flex-shrink-0 bg-primary-soft2 border-line text-ink-muted">
+                    <span id="status-dot" class="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-ink-muted"></span>
+                    <span id="status-text">Menunggu</span>
+                </div>
+            </div>
+
+            <!-- Emergency Alert -->
+            <div class="px-5 pt-4">
+                <p class="text-[9px] font-bold uppercase tracking-widest text-ink-muted mb-2">Status Darurat</p>
+                <div id="alert-card"
+                    class="relative overflow-hidden rounded-2xl border border-line bg-primary-soft2 px-4 py-3.5 transition-all duration-300">
+                    <div class="flex items-center gap-3">
+                        <div id="alert-icon-wrap"
+                            class="relative w-9 h-9 rounded-xl bg-white border border-line flex items-center justify-center flex-shrink-0">
+                            <svg id="alert-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8A716E"
+                                stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+                                <path d="M13.73 21a2 2 0 01-3.46 0" />
+                            </svg>
+                        </div>
+                        <div class="min-w-0">
+                            <p id="alert-title" class="text-[13px] font-bold text-ink leading-tight">Tidak Ada Darurat
+                            </p>
+                            <p id="alert-sub" class="text-[10.5px] text-ink-muted mt-0.5 font-mono">Tombol dalam kondisi
+                                normal</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Kontak Notifikasi Darurat -->
+            <div class="px-5 pt-4">
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-ink-muted">Kontak Notifikasi Darurat
+                    </p>
+                    <span id="kontak-saved-tag"
+                        class="text-[9px] font-mono text-primary-strong opacity-0 transition-opacity duration-300">Tersimpan</span>
+                </div>
+
+                <div id="kontak-list" class="space-y-1.5"></div>
+
+                <div id="kontak-form" class="hidden mt-2 p-3 rounded-xl border border-line bg-primary-soft2 space-y-2">
+                    <input id="kontak-input-nama" type="text" placeholder="Nama kontak"
+                        class="w-full text-[12px] px-3 py-2 rounded-lg border border-line bg-white focus:outline-none focus:border-primary-strong/50" />
+                    <input id="kontak-input-nomor" type="tel" placeholder="Nomor WA (contoh: 62812xxxxxxx)"
+                        class="w-full font-mono text-[12px] px-3 py-2 rounded-lg border border-line bg-white focus:outline-none focus:border-primary-strong/50" />
+                    <div class="flex gap-2">
+                        <button id="kontak-form-save"
+                            class="flex-1 text-[12px] font-semibold text-white bg-primary hover:bg-primary-strong rounded-lg py-2 transition-colors">Simpan</button>
+                        <button id="kontak-form-cancel"
+                            class="text-[12px] font-medium text-ink-muted hover:text-ink px-3 py-2">Batal</button>
+                    </div>
+                </div>
+
+                <button id="kontak-add-btn"
+                    class="mt-2 w-full flex items-center justify-center gap-1.5 text-[11.5px] font-semibold text-primary-strong border border-dashed border-primary-strong/30 rounded-xl py-2 hover:bg-primary-soft2 transition-colors">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round">
+                        <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    Tambah Kontak
+                </button>
+
+                <p class="text-[9.5px] text-ink-muted mt-2 leading-snug">Centang kontak yang aktif — bisa lebih dari
+                    satu. Semua yang dicentang akan menerima WhatsApp saat tombol darurat ditekan. Tambah, ubah, atau
+                    hapus kontak langsung dari sini.</p>
+            </div>
+
+            <!-- Posisi -->
+            <div class="px-5 pt-4">
+                <p class="text-[9px] font-bold uppercase tracking-widest text-ink-muted mb-2">Posisi Terkini</p>
+                <div class="grid grid-cols-2 gap-2.5">
+                    <div class="bg-primary-soft2 border border-line rounded-xl px-3.5 py-2.5">
+                        <p class="text-[9px] font-bold uppercase tracking-widest text-primary-strong/70 mb-1">Latitude
+                        </p>
+                        <p class="font-mono text-[13px] font-semibold text-ink leading-none" id="val-lat">—</p>
+                    </div>
+                    <div class="bg-primary-soft2 border border-line rounded-xl px-3.5 py-2.5">
+                        <p class="text-[9px] font-bold uppercase tracking-widest text-primary-strong/70 mb-1">Longitude
+                        </p>
+                        <p class="font-mono text-[13px] font-semibold text-ink leading-none" id="val-lng">—</p>
+                    </div>
+                </div>
+                <div class="mt-2 flex items-center gap-2 px-1">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8A716E" stroke-width="2.5"
+                        stroke-linecap="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <path d="M12 6v6l4 2" />
+                    </svg>
+                    <span class="font-mono text-[10px] text-ink-muted">Update: <span id="val-time"
+                            class="text-ink font-medium">—</span></span>
+                </div>
+            </div>
+
+            <!-- Riwayat -->
+            <div class="px-5 pt-5 pb-4 flex-1 flex flex-col min-h-[160px]">
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-ink-muted">Riwayat Jejak</p>
+                    <span id="trail-count" class="text-[10px] font-mono text-ink-muted">0 titik</span>
+                </div>
+                <div id="trail-list" class="flex-1 space-y-0.5 pr-1">
+                    <p class="font-mono text-xs text-ink-muted">Belum ada riwayat...</p>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ══════════════════════ MAIN / MAP ══════════════════════ -->
+        <main class="relative flex-1 h-full">
+            <div id="map" class="absolute inset-0 z-0"></div>
+
+            <div id="no-data-overlay"
+                class="absolute inset-0 z-[999] flex items-center justify-center bg-white/90 backdrop-blur-sm pointer-events-none">
+                <div class="text-center px-6 pointer-events-auto">
+                    <div class="w-14 h-14 rounded-2xl bg-primary-soft mx-auto flex items-center justify-center mb-4">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#B23D35" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" />
+                            <circle cx="12" cy="10" r="3" />
+                        </svg>
+                    </div>
+                    <p class="font-display font-semibold text-ink text-[15px]">Menunggu Sinyal GPS</p>
+                    <p class="text-ink-muted text-[12px] mt-1 max-w-[220px] mx-auto">Peta akan otomatis terisi begitu
+                        tongkat mengirim lokasi pertama.</p>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
+                <button id="center-btn" onclick="centerMap()" title="Ke posisi saat ini"
+                    class="w-10 h-10 rounded-xl bg-white border border-line shadow-sm shadow-primary-strong/5 flex items-center justify-center hover:bg-primary-soft2 transition-colors cursor-pointer">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#B23D35" stroke-width="2.5"
+                        stroke-linecap="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <circle cx="12" cy="12" r="3" />
+                        <line x1="12" y1="2" x2="12" y2="6" />
+                        <line x1="12" y1="18" x2="12" y2="22" />
+                        <line x1="2" y1="12" x2="6" y2="12" />
+                        <line x1="18" y1="12" x2="22" y2="12" />
+                    </svg>
+                </button>
+                <button id="trail-btn" onclick="toggleTrail()" title="Toggle jejak rute"
+                    class="w-10 h-10 rounded-xl bg-white border border-line shadow-sm shadow-primary-strong/5 flex items-center justify-center hover:bg-primary-soft2 transition-colors cursor-pointer">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#B23D35" stroke-width="2.5"
+                        stroke-linecap="round">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                    </svg>
+                </button>
+            </div>
+
+        </main>
+    </div>
+
+    <script>
+        window.addEventListener('load', function () {
+            const map = L.map('map', { center: [-7.5, 112.2], zoom: 14, zoomControl: false });
+
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 19,
+                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, © OpenStreetMap contributors, and the GIS User Community'
+            }).addTo(map);
+
+            L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+            const markerIcon = L.divIcon({
+                className: '',
+                html: `<div style="position:relative;width:46px;height:46px;">
+              <div class="echo-ring"></div>
+              <div class="echo-ring delay-1"></div>
+              <div class="echo-ring delay-2"></div>
+              <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+                    width:14px;height:14px;background:#D6534A;border-radius:50%;
+                    box-shadow:0 0 0 3px white,0 4px 12px rgba(178,61,53,.45);"></div>
+              </div>`,
+                iconSize: [46, 46], iconAnchor: [23, 23], popupAnchor: [0, -26],
+            });
+
+            let marker = null, polyline = null, trailOn = true;
+            const history = [], MAX_TRAIL = 100;
+
+            function centerMap() {
+                if (marker) map.setView(marker.getLatLng(), map.getZoom(), { animate: true });
+            }
+
+            function toggleTrail() {
+                trailOn = !trailOn;
+                if (polyline) trailOn ? polyline.addTo(map) : map.removeLayer(polyline);
+                const btn = document.getElementById('trail-btn');
+                if (btn) {
+                    btn.style.borderColor = trailOn ? '' : '#B23D35';
+                    btn.style.background = trailOn ? '' : '#FBE2DF';
+                }
+            }
+
+            // Mengekspos fungsi ke global window agar atribut onclick="..." pada elemen HTML berfungsi sempurna
+            window.centerMap = centerMap;
+            window.toggleTrail = toggleTrail;
+            document.getElementById('center-btn')?.addEventListener('click', centerMap);
+            document.getElementById('trail-btn')?.addEventListener('click', toggleTrail);
+
+            function drawTrail() {
+                if (polyline) map.removeLayer(polyline);
+                if (history.length < 2) return;
+                polyline = L.polyline(history.map(h => [h.lat, h.lng]), {
+                    color: '#D6534A', weight: 3, opacity: .5, dashArray: '6 10', lineJoin: 'round'
+                });
+                if (trailOn) polyline.addTo(map);
+            }
+
+            function renderTrailList() {
+                const list = document.getElementById('trail-list');
+                const count = document.getElementById('trail-count');
+                count.textContent = `${history.length} titik`;
+
+                if (!history.length) {
+                    list.innerHTML = `<p class="font-mono text-xs text-ink-muted">Belum ada riwayat...</p>`;
+                    return;
+                }
+                list.innerHTML = '';
+                [...history].reverse().forEach((h, i) => {
+                    const t = new Date(h.timestamp);
+                    const label = i === 0 ? 'Sekarang' : t.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    const el = document.createElement('div');
+                    el.className = 'fade-up flex items-start gap-2.5 px-3 py-2 rounded-xl ' + (i === 0 ? 'bg-primary-soft2 border border-line' : 'hover:bg-primary-soft2/60');
+                    el.innerHTML = `
+          <div class="trail-dot mt-1 ${i === 0 ? 'bg-primary' : 'bg-line'}"></div>
+          <div class="min-w-0">
+            <p class="text-[11px] font-semibold ${i === 0 ? 'text-primary-strong' : 'text-ink-muted'}">${label}</p>
+            <p class="font-mono text-[10px] text-ink-muted truncate">${h.lat.toFixed(6)}, ${h.lng.toFixed(6)}</p>
+          </div>`;
+                    list.appendChild(el);
+                });
+            }
+
+            function popupHTML(lat, lng) {
+                return `<div style="padding:4px 2px;min-width:160px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+          <div style="width:8px;height:8px;border-radius:50%;background:#D6534A;"></div>
+          <span style="font-family:'Inter',sans-serif;font-weight:700;font-size:12px;color:#241715;">Tongkat Pintar</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <div style="display:flex;justify-content:space-between;gap:12px;">
+            <span style="color:#8A716E;font-size:10px;">Lat</span>
+            <span style="color:#B23D35;font-weight:500;font-size:10px;">${lat.toFixed(6)}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;gap:12px;">
+            <span style="color:#8A716E;font-size:10px;">Lng</span>
+            <span style="color:#B23D35;font-weight:500;font-size:10px;">${lng.toFixed(6)}</span>
+          </div>
+        </div>
+      </div>`;
+            }
+
+            let connectionTimeout = null;
+
+            function setStatus(state) {
+                const badge = document.getElementById('status-badge');
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+
+                const C = {
+                    live: { cls: 'bg-green-50 border-green-200 text-green-700', dot: 'bg-green-500', label: 'Terhubung' },
+                    disconnected: { cls: 'bg-primary-soft border-line text-primary-strong', dot: 'bg-primary', label: 'Terputus' },
+                    error: { cls: 'bg-primary-soft border-line text-primary-strong', dot: 'bg-primary', label: 'Error' },
+                    waiting: { cls: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-500', label: 'Menunggu' },
+                }[state];
+
+                badge.className = `flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border flex-shrink-0 transition-all duration-300 ${C.cls}`;
+                dot.className = (state === 'disconnected' || state === 'error') ? `w-1.5 h-1.5 rounded-full flex-shrink-0 ${C.dot}` : `blink w-1.5 h-1.5 rounded-full flex-shrink-0 ${C.dot}`;
+                text.textContent = C.label;
+            }
+
+            // Validasi data GPS sebelum dirender, mencegah NaN tampil di UI jika data Firebase tidak lengkap
+            window.__gpsHandler = function (d) {
+                const lat = +d.latitude, lng = +d.longitude;
+                if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+                    console.warn("Data GPS tidak valid:", d);
+                    return;
+                }
+
+                const ts = d.timestamp;
+                const timeStr = ts
+                    ? new Date(ts).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                    : '—';
+
+                document.getElementById('val-lat').textContent = lat.toFixed(6);
+                document.getElementById('val-lng').textContent = lng.toFixed(6);
+                document.getElementById('val-time').textContent = timeStr;
+
+                setStatus('live');
+
+                // Reset timer disconnect setiap kali ada data baru masuk
+                if (connectionTimeout) clearTimeout(connectionTimeout);
+                connectionTimeout = setTimeout(() => setStatus('disconnected'), 10000);
+
+                document.getElementById('no-data-overlay').style.display = 'none';
+
+                const ll = [lat, lng];
+                if (!marker) {
+                    marker = L.marker(ll, { icon: markerIcon }).addTo(map).bindPopup(popupHTML(lat, lng));
+                    map.setView(ll, 16, { animate: true });
+                } else {
+                    marker.setLatLng(ll);
+                    marker.getPopup()?.setContent(popupHTML(lat, lng));
+                }
+
+                history.push({ lat, lng, timestamp: ts || Date.now() });
+                if (history.length > MAX_TRAIL) history.shift();
+                drawTrail();
+                renderTrailList();
+            };
+
+            window.__setError = function (msg) { setStatus('error'); console.error(msg); };
+            if (window.__errQueue) window.__setError(window.__errQueue);
+
+            setStatus('waiting');
+
+            // Tandai handler siap, proses data GPS yang sempat tertunda sebelum halaman selesai load
+            window.__gpsReady = true;
+            if (window.__gpsQueue) { window.__gpsHandler(window.__gpsQueue); window.__gpsQueue = null; }
+
+            // ══════════════════ EMERGENCY BUTTON ══════════════════
+            let alertActive = false;
+            let alertSinceTs = null;
+            let alertTimerInterval = null;
+
+            function renderAlertCard(active) {
+                const card = document.getElementById('alert-card');
+                const iconWrap = document.getElementById('alert-icon-wrap');
+                const icon = document.getElementById('alert-icon');
+                const title = document.getElementById('alert-title');
+                const sub = document.getElementById('alert-sub');
+
+                if (active) {
+                    card.className = 'relative overflow-hidden rounded-2xl border border-primary-strong px-4 py-3.5 transition-all duration-300 shadow-lg shadow-primary-strong/20';
+                    card.style.animation = 'alertPulseBg 1.6s ease-in-out infinite';
+                    iconWrap.className = 'relative w-9 h-9 rounded-xl bg-white/15 border border-white/30 flex items-center justify-center flex-shrink-0';
+                    iconWrap.innerHTML = '<div class="alert-ring"></div>' + iconWrap.innerHTML;
+                    icon.setAttribute('stroke', '#ffffff');
+                    title.className = 'text-[13px] font-bold text-white leading-tight';
+                    title.textContent = 'DARURAT AKTIF';
+                    sub.className = 'text-[10.5px] text-white/85 mt-0.5 font-mono';
+                    sub.textContent = 'Tombol bantuan sedang ditekan';
+
+                    if (!alertTimerInterval) {
+                        alertSinceTs = Date.now();
+                        alertTimerInterval = setInterval(() => {
+                            const secs = Math.floor((Date.now() - alertSinceTs) / 1000);
+                            const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+                            const ss = String(secs % 60).padStart(2, '0');
+                            sub.textContent = `Aktif sejak ${mm}:${ss}`;
+                        }, 1000);
+                    }
+                } else {
+                    card.style.animation = '';
+                    card.className = 'relative overflow-hidden rounded-2xl border border-line bg-primary-soft2 px-4 py-3.5 transition-all duration-300';
+                    iconWrap.className = 'relative w-9 h-9 rounded-xl bg-white border border-line flex items-center justify-center flex-shrink-0';
+                    icon.setAttribute('stroke', '#8A716E');
+                    title.className = 'text-[13px] font-bold text-ink leading-tight';
+                    title.textContent = 'Tidak Ada Darurat';
+                    sub.className = 'text-[10.5px] text-ink-muted mt-0.5 font-mono';
+                    sub.textContent = 'Tombol dalam kondisi normal';
+
+                    if (alertTimerInterval) { clearInterval(alertTimerInterval); alertTimerInterval = null; }
+                }
+            }
+
+            window.__btnHandler = function (isActive) {
+                if (isActive === alertActive) return;
+                alertActive = isActive;
+                renderAlertCard(alertActive);
+            };
+            window.__btnReady = true;
+            if (window.__btnQueue !== null) { window.__btnHandler(window.__btnQueue); window.__btnQueue = null; }
+
+            // ══════════════════ KONTAK NOTIFIKASI DARURAT (bisa >1, edit dari website) ══════════════════
+            let kontakData = {};   // { id: { nama, nomor, aktif } }
+            let editingId = null;
+
+            function escapeHtml(str) {
+                return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+            }
+
+            function flashSaved() {
+                const tag = document.getElementById('kontak-saved-tag');
+                tag.classList.remove('opacity-0');
+                setTimeout(() => tag.classList.add('opacity-0'), 1600);
+            }
+
+            function renderKontakList() {
+                const container = document.getElementById('kontak-list');
+                const ids = Object.keys(kontakData);
+
+                if (!ids.length) {
+                    container.innerHTML = `<p class="font-mono text-xs text-ink-muted">Belum ada kontak. Tambahkan minimal satu.</p>`;
+                    return;
+                }
+
+                container.innerHTML = '';
+                ids.forEach(id => {
+                    const k = kontakData[id];
+                    const row = document.createElement('div');
+
+                    if (editingId === id) {
+                        row.className = 'p-2.5 rounded-xl border border-primary-strong/40 bg-primary-soft space-y-2';
+                        row.innerHTML = `
+              <input data-role="edit-nama" type="text" value="${escapeHtml(k.nama)}" placeholder="Nama kontak"
+                class="w-full text-[12px] px-2.5 py-1.5 rounded-lg border border-line bg-white focus:outline-none focus:border-primary-strong/50" />
+              <input data-role="edit-nomor" type="tel" value="${escapeHtml(k.nomor)}" placeholder="Nomor WA"
+                class="w-full font-mono text-[12px] px-2.5 py-1.5 rounded-lg border border-line bg-white focus:outline-none focus:border-primary-strong/50" />
+              <div class="flex gap-2">
+                <button data-action="save-edit" data-id="${id}"
+                  class="flex-1 text-[11.5px] font-semibold text-white bg-primary hover:bg-primary-strong rounded-lg py-1.5 transition-colors">Simpan</button>
+                <button data-action="cancel-edit"
+                  class="text-[11.5px] font-medium text-ink-muted hover:text-ink px-2">Batal</button>
+              </div>`;
+                    } else {
+                        row.className = 'flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-line bg-white';
+                        row.innerHTML = `
+              <button data-action="toggle" data-id="${id}"
+                class="w-[18px] h-[18px] rounded-md border-2 flex items-center justify-center flex-shrink-0 transition-colors ${k.aktif ? 'bg-primary border-primary' : 'border-line'}">
+                ${k.aktif ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+              </button>
+              <div class="min-w-0 flex-1">
+                <p class="text-[12px] font-semibold text-ink leading-tight truncate">${escapeHtml(k.nama)}</p>
+                <p class="font-mono text-[10px] text-ink-muted truncate">+${escapeHtml(k.nomor)}</p>
+              </div>
+              <button data-action="edit" data-id="${id}"
+                class="w-6 h-6 rounded-md hover:bg-primary-soft2 flex items-center justify-center flex-shrink-0 text-ink-muted hover:text-primary-strong transition-colors">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
+              <button data-action="delete" data-id="${id}"
+                class="w-6 h-6 rounded-md hover:bg-primary-soft2 flex items-center justify-center flex-shrink-0 text-ink-muted hover:text-primary-strong transition-colors">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+              </button>`;
+                    }
+                    container.appendChild(row);
+                });
+            }
+
+            document.getElementById('kontak-list').addEventListener('click', (e) => {
+                const btn = e.target.closest('button[data-action]');
+                if (!btn) return;
+                const action = btn.dataset.action;
+                const id = btn.dataset.id;
+
+                if (action === 'toggle') {
+                    window.__toggleKontak(id, !kontakData[id].aktif);
+                    flashSaved();
+                } else if (action === 'edit') {
+                    editingId = id;
+                    renderKontakList();
+                } else if (action === 'cancel-edit') {
+                    editingId = null;
+                    renderKontakList();
+                } else if (action === 'delete') {
+                    if (confirm(`Hapus kontak "${kontakData[id].nama}"?`)) {
+                        window.__hapusKontak(id);
+                        flashSaved();
+                    }
+                } else if (action === 'save-edit') {
+                    const row = btn.closest('#kontak-list > div');
+                    const nama = row.querySelector('[data-role="edit-nama"]').value.trim();
+                    let nomor = row.querySelector('[data-role="edit-nomor"]').value.trim().replace(/\D/g, '');
+                    if (!nama || !nomor) { alert('Nama dan nomor tidak boleh kosong.'); return; }
+                    if (nomor.startsWith('0')) nomor = '62' + nomor.slice(1);
+                    window.__editKontak(id, nama, nomor);
+                    editingId = null;
+                    flashSaved();
+                }
+            });
+
+            document.getElementById('kontak-add-btn').addEventListener('click', () => {
+                document.getElementById('kontak-form').classList.toggle('hidden');
+            });
+
+            document.getElementById('kontak-form-cancel').addEventListener('click', () => {
+                document.getElementById('kontak-form').classList.add('hidden');
+                document.getElementById('kontak-input-nama').value = '';
+                document.getElementById('kontak-input-nomor').value = '';
+            });
+
+            document.getElementById('kontak-form-save').addEventListener('click', () => {
+                const nama = document.getElementById('kontak-input-nama').value.trim();
+                let nomor = document.getElementById('kontak-input-nomor').value.trim().replace(/\D/g, '');
+                if (!nama || !nomor) { alert('Nama dan nomor tidak boleh kosong.'); return; }
+                if (nomor.startsWith('0')) nomor = '62' + nomor.slice(1);
+                window.__tambahKontak(nama, nomor);
+                document.getElementById('kontak-input-nama').value = '';
+                document.getElementById('kontak-input-nomor').value = '';
+                document.getElementById('kontak-form').classList.add('hidden');
+                flashSaved();
+            });
+
+            window.__kontakHandler = function (v) {
+                kontakData = v || {};
+                editingId = null;
+                renderKontakList();
+            };
+            window.__kontakReady = true;
+            if (window.__kontakQueue !== undefined) { window.__kontakHandler(window.__kontakQueue); window.__kontakQueue = undefined; }
+        });
+    </script>
+</body>
+
+</html>
